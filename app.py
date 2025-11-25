@@ -1,33 +1,16 @@
 from flask import Flask, jsonify, render_template, request
 import sqlite3
-import pymongo
+import os
 
 app = Flask(__name__)
 
 # -----------------------------
-# Database configurations
+# SQLite configuration
 # -----------------------------
-
-# SQLite setup
-DATABASE = 'db/books.db'
-
-# MongoDB setup
-client = pymongo.MongoClient("mongodb://localhost:27017/")
-mongo_db = client['book_database']             # MongoDB database
-reviews_collection = mongo_db['reviews']       # MongoDB collection
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE = os.path.join(BASE_DIR, 'db', 'books.db')
 
 
-
-# Quick connection test
-try:
-    mongo_db.command("ping")
-    print("✅ Connected to MongoDB successfully!")
-except Exception as e:
-    print("❌ MongoDB connection failed:", e)
-
-# -----------------------------
-# SQLite helper functions
-# -----------------------------
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
@@ -46,13 +29,11 @@ def get_all_books():
         books = cursor.fetchall()
         conn.close()
 
-        book_list = []
-        for book in books:
-            book_list.append({
-                'book_id': book['book_id'],
-                'title': book['title'],
-                'publication_year': book['publication_year']
-            })
+        book_list = [{
+            'book_id': b['book_id'],
+            'title': b['title'],
+            'publication_year': b['publication_year']
+        } for b in books]
 
         return jsonify({'books': book_list})
     except Exception as e:
@@ -88,11 +69,14 @@ def add_book():
         publication_year = data.get('publication_year')
 
         if not title or not publication_year:
-            return jsonify({'error': 'Missing title or publication_year'}), 400
+            return jsonify({'error': 'Missing fields'}), 400
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO Books (title, publication_year) VALUES (?, ?)", (title, publication_year))
+        cursor.execute(
+            "INSERT INTO Books (title, publication_year) VALUES (?, ?)",
+            (title, publication_year)
+        )
         conn.commit()
         conn.close()
 
@@ -102,72 +86,105 @@ def add_book():
 
 
 # -----------------------------
-# API: MongoDB (Reviews)
+# Reviews (SQLite version)
 # -----------------------------
 
-# Get all reviews
 @app.route('/api/reviews', methods=['GET'])
 def get_all_reviews():
     try:
-        print("📡 Fetching all reviews from MongoDB...")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT r.id, r.book_id, b.title AS book_title,
+                   r.user, r.rating, r.comment, r.created_at
+            FROM Reviews r
+            JOIN Books b ON r.book_id = b.book_id
+            ORDER BY r.created_at DESC
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
 
-        # Check which database and collection Flask is using
-        print("🗂️ Current database:", mongo_db.name)
-        print("📁 Collection name:", reviews_collection.name)
+        reviews = []
+        for r in rows:
+            reviews.append({
+                "id": r["id"],
+                "book_id": r["book_id"],
+                "book_title": r["book_title"],
+                "user": r["user"],
+                "rating": r["rating"],
+                "comment": r["comment"],
+                "created_at": r["created_at"]
+            })
+        return jsonify({"reviews": reviews})
 
-        reviews = list(reviews_collection.find({}, {'_id': 0}))
-        print("✅ Found", len(reviews), "reviews")
-        if len(reviews) > 0:
-            print("Sample review:", reviews[0])
-
-        return jsonify({'reviews': reviews})
     except Exception as e:
-        print("❌ Error fetching reviews:", e)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
-
-# Add a new review
 @app.route('/api/add_review', methods=['POST'])
 def add_review():
     try:
         data = request.get_json()
-        book_id = int(data.get('book_id')) if data.get('book_id') else None  # 👈 convert to int
+        book_id = data.get('book_id')
         user = data.get('user')
         rating = data.get('rating')
         comment = data.get('comment')
 
         if not all([book_id, user, rating, comment]):
-            return jsonify({'error': 'Missing required fields'}), 400
+            return jsonify({'error': 'Missing fields'}), 400
 
-        review = {
-            'book_id': book_id,
-            'user': user,
-            'rating': rating,
-            'comment': comment
-        }
-        result = reviews_collection.insert_one(review)
-        print(f"✅ Inserted review for book {book_id} (id={result.inserted_id})")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO Reviews (book_id, user, rating, comment)
+            VALUES (?, ?, ?, ?)
+            """,
+            (book_id, user, rating, comment)
+        )
+        conn.commit()
+        conn.close()
 
-        return jsonify({'message': 'Review added successfully'})
+        return jsonify({'message': 'Review added'})
     except Exception as e:
-        print("❌ Error inserting review:", e)
         return jsonify({'error': str(e)}), 500
 
 
-
-# Get reviews for a specific book
 @app.route('/api/books/<int:book_id>/reviews', methods=['GET'])
 def get_reviews_for_book(book_id):
     try:
-        reviews = list(reviews_collection.find({'book_id': book_id}, {'_id': 0}))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, book_id, user, rating, comment, created_at
+            FROM Reviews
+            WHERE book_id = ?
+            ORDER BY created_at DESC
+            """,
+            (book_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        reviews = [{
+            'id': r['id'],
+            'book_id': r['book_id'],
+            'user': r['user'],
+            'rating': r['rating'],
+            'comment': r['comment'],
+            'created_at': r['created_at']
+        } for r in rows]
+
         return jsonify({'book_id': book_id, 'reviews': reviews})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 # -----------------------------
-# Root route for frontend
+# Root route (frontend)
 # -----------------------------
 @app.route('/')
 def index():
@@ -178,4 +195,4 @@ def index():
 # Run app
 # -----------------------------
 if __name__ == '__main__':
-    app.run(debug=True, host="0.0.0.0")
+    app.run(debug=True, host='0.0.0.0')
